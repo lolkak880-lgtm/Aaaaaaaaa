@@ -1,0 +1,267 @@
+name: Build APK
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install Gradle
+        run: |
+          wget -q https://services.gradle.org/distributions/gradle-8.7-bin.zip
+          unzip -q gradle-8.7-bin.zip
+          echo "$PWD/gradle-8.7/bin" >> "$GITHUB_PATH"
+
+      - name: Create project files
+        run: |
+          mkdir -p app/src/main/java/com/example/antivirus
+          cat > gradle.properties <<'EOF'
+          org.gradle.jvmargs=-Xmx2048m
+          EOF
+          cat > settings.gradle <<'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "Antivirus"
+          include ':app'
+          EOF
+          cat > build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application' version '8.4.1' apply false
+          }
+          EOF
+          cat > app/build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application'
+          }
+          android {
+              namespace 'com.example.antivirus'
+              compileSdk 34
+              defaultConfig {
+                  applicationId 'com.example.antivirus'
+                  minSdk 24
+                  targetSdk 34
+                  versionCode 1
+                  versionName '1.0'
+              }
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_1_8
+                  targetCompatibility JavaVersion.VERSION_1_8
+              }
+          }
+          EOF
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
+              <application
+                  android:label="Antivirus"
+                  android:theme="@android:style/Theme.Material.Light">
+                  <activity android:name=".MainActivity" android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF
+          cat > app/src/main/java/com/example/antivirus/MainActivity.java <<'EOF'
+          package com.example.antivirus;
+
+          import android.app.Activity;
+          import android.content.pm.ApplicationInfo;
+          import android.content.pm.PackageInfo;
+          import android.content.pm.PackageManager;
+          import android.os.AsyncTask;
+          import android.os.Bundle;
+          import android.view.View;
+          import android.view.ViewGroup;
+          import android.widget.Button;
+          import android.widget.LinearLayout;
+          import android.widget.ProgressBar;
+          import android.widget.TextView;
+
+          import java.io.File;
+          import java.io.FileInputStream;
+          import java.security.MessageDigest;
+          import java.util.ArrayList;
+          import java.util.HashSet;
+          import java.util.List;
+          import java.util.Set;
+
+          public class MainActivity extends Activity {
+
+              private static final Set<String> KNOWN_MALWARE_HASHES = new HashSet<String>();
+
+              private TextView status;
+              private ProgressBar progress;
+              private LinearLayout results;
+              private Button scan;
+
+              @Override
+              protected void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+                  LinearLayout root = new LinearLayout(this);
+                  root.setOrientation(LinearLayout.VERTICAL);
+                  root.setPadding(32, 32, 32, 32);
+
+                  TextView title = new TextView(this);
+                  title.setText("Antivirus");
+                  title.setTextSize(24);
+                  root.addView(title);
+
+                  status = new TextView(this);
+                  status.setText("Нажмите «Сканировать»");
+                  root.addView(status);
+
+                  progress = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
+                  root.addView(progress, new LinearLayout.LayoutParams(
+                          ViewGroup.LayoutParams.MATCH_PARENT,
+                          ViewGroup.LayoutParams.WRAP_CONTENT));
+
+                  scan = new Button(this);
+                  scan.setText("Сканировать");
+                  scan.setOnClickListener(new View.OnClickListener() {
+                      @Override
+                      public void onClick(View v) {
+                          startScan();
+                      }
+                  });
+                  root.addView(scan);
+
+                  results = new LinearLayout(this);
+                  results.setOrientation(LinearLayout.VERTICAL);
+                  root.addView(results);
+
+                  setContentView(root);
+              }
+
+              private void startScan() {
+                  results.removeAllViews();
+                  scan.setEnabled(false);
+                  final PackageManager pm = getPackageManager();
+                  final List<ApplicationInfo> userApps = new ArrayList<ApplicationInfo>();
+                  for (ApplicationInfo ai : pm.getInstalledApplications(0)) {
+                      if ((ai.flags & ApplicationInfo.FLAG_SYSTEM) == 0) {
+                          userApps.add(ai);
+                      }
+                  }
+                  progress.setMax(userApps.size());
+                  progress.setProgress(0);
+
+                  new AsyncTask<Void, Integer, List<String>>() {
+                      @Override
+                      protected List<String> doInBackground(Void... voids) {
+                          List<String> risky = new ArrayList<String>();
+                          for (int i = 0; i < userApps.size(); i++) {
+                              ApplicationInfo ai = userApps.get(i);
+                              String hash = sha256(ai.sourceDir);
+                              int risk = 0;
+                              try {
+                                  PackageInfo pi = pm.getPackageInfo(ai.packageName,
+                                          PackageManager.GET_PERMISSIONS);
+                                  if (pi.requestedPermissions != null) {
+                                      for (String p : pi.requestedPermissions) {
+                                          if (isDangerous(p)) {
+                                              risk += 15;
+                                          }
+                                      }
+                                  }
+                              } catch (Exception e) {
+                              }
+                              if (KNOWN_MALWARE_HASHES.contains(hash) || risk >= 30) {
+                                  String label = ai.packageName;
+                                  try {
+                                      label = String.valueOf(
+                                              pm.getApplicationLabel(
+                                                      pm.getApplicationInfo(ai.packageName, 0)));
+                                  } catch (Exception e) {
+                                  }
+                                  risky.add(label + " — риск " + Math.min(risk, 100) + "%");
+                              }
+                              publishProgress(i + 1);
+                          }
+                          return risky;
+                      }
+
+                      @Override
+                      protected void onProgressUpdate(Integer... values) {
+                          progress.setProgress(values[0]);
+                      }
+
+                      @Override
+                      protected void onPostExecute(List<String> risky) {
+                          scan.setEnabled(true);
+                          if (risky.isEmpty()) {
+                              status.setText("Угроз не найдено");
+                          } else {
+                              status.setText("Подозрительных приложений: " + risky.size());
+                              for (String s : risky) {
+                                  TextView tv = new TextView(MainActivity.this);
+                                  tv.setText(s);
+                                  results.addView(tv);
+                              }
+                          }
+                      }
+                  }.execute();
+              }
+
+              private boolean isDangerous(String permission) {
+                  return permission.contains("RECEIVE_SMS")
+                          || permission.contains("READ_SMS")
+                          || permission.contains("READ_CONTACTS")
+                          || permission.contains("RECORD_AUDIO")
+                          || permission.contains("REQUEST_INSTALL_PACKAGES")
+                          || permission.contains("READ_CALL_LOG")
+                          || permission.contains("CAMERA")
+                          || permission.contains("ACCESS_FINE_LOCATION");
+              }
+
+              private String sha256(String path) {
+                  try {
+                      MessageDigest md = MessageDigest.getInstance("SHA-256");
+                      FileInputStream fis = new FileInputStream(new File(path));
+                      byte[] buf = new byte[8192];
+                      int n;
+                      while ((n = fis.read(buf)) != -1) {
+                          md.update(buf, 0, n);
+                      }
+                      fis.close();
+                      StringBuilder sb = new StringBuilder();
+                      for (byte b : md.digest()) {
+                          sb.append(String.format("%02x", b));
+                      }
+                      return sb.toString();
+                  } catch (Exception e) {
+                      return "";
+                  }
+              }
+          }
+          EOF
+
+      - name: Build APK
+        run: gradle assembleDebug --no-daemon
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: antivirus-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
